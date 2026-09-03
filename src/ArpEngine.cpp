@@ -2,7 +2,8 @@
 
 namespace
 {
-    constexpr int arpChannel = 1;   // all arp notes go out on MIDI channel 1
+    constexpr int arpChannel = 1;       // all arp notes go out on MIDI channel 1
+    constexpr int maxPhraseLength = 256;
 
     void addNoteOn (juce::MidiBuffer& out, int pos, int note, int velocity)
     {
@@ -22,7 +23,6 @@ namespace
 void ArpEngine::prepare (double newSampleRate)
 {
     sampleRate = newSampleRate;
-    chordWindowSamples = juce::jmax (1, (int) (0.030 * newSampleRate + 0.5));
     random.setSeedRandomly();
     reset();
 }
@@ -31,15 +31,14 @@ void ArpEngine::reset()
 {
     phrase.clear();
     keyCounts.fill (0);
+    heldKeyCount = 0;
+    sustaining = false;
     sequence.clear();
     step = 0;
     activeNote = -1;
     samplesToNextTick = -1;
     gateCountdown = -1;
     holdCountdown = -1;
-    pendingFire = false;
-    blockStartAbs = 0;
-    lastNoteOnAbs = -(1 << 30);
 }
 
 void ArpEngine::setParameters (const Params& newParams)
@@ -52,22 +51,15 @@ void ArpEngine::setParameters (const Params& newParams)
     holdSamples = juce::jmax (0, (int) (params.holdSeconds * sampleRate));
     holdLatch   = params.holdLatch;
 
-    // While sustaining, phrase is empty and sequence is a frozen snapshot:
-    // rebuildSequence() leaves it alone, so rate/gate stay live and the
-    // pattern only changes when a new phrase starts.
+    // Re-deriving the sequence from the (unchanged) phrase is harmless while
+    // playing or sustaining, and lets mode/octave changes apply live.
     rebuildSequence();
 }
 
 //==============================================================================
 void ArpEngine::process (const juce::MidiBuffer& midiIn, juce::MidiBuffer& midiOut, int numSamples)
 {
-    const juce::int64 absStart = blockStartAbs;
-
     // ---- pass 1: note intake ------------------------------------------------
-    // A note-on inside the chord window joins the current phrase; past the
-    // window it starts a new one and the previous sequence is dropped
-    // completely. The phrase only starts playing once the window has closed,
-    // so a chord played by hand begins as a complete sequence.
     for (const auto metadata : midiIn)
     {
         const auto msg = metadata.getMessage();
@@ -76,112 +68,103 @@ void ArpEngine::process (const juce::MidiBuffer& midiIn, juce::MidiBuffer& midiO
         if (msg.isNoteOn())
         {
             const int note = msg.getNoteNumber();
-            if (std::find (phrase.begin(), phrase.end(), note) != phrase.end())
-                continue;   // duplicate note-on, ignore
+            if (keyCounts[(size_t) note] > 0)
+                continue;   // duplicate note-on, key already down
 
-            const juce::int64 absEvent = absStart + pos;
-            const bool chordMate = ! phrase.empty()
-                                && (absEvent - lastNoteOnAbs) <= chordWindowSamples;
-
-            if (! chordMate)
+            if (heldKeyCount == 0)
             {
-                // New phrase: the previous sequence is dropped completely,
-                // even though its keys may still be down -- their note-offs
-                // are tracked by keyCounts and will simply fall through.
+                // New phrase: the first note played while nothing is held
+                // replaces whatever was looping (hold) or silent, even though
+                // the held sequence may still be sounding.
                 stopNote (midiOut, pos);
                 phrase.clear();
                 step = 0;
+                sustaining = false;
                 holdCountdown = -1;
                 samplesToNextTick = -1;
                 gateCountdown = -1;
             }
 
+            // every press is recorded, repeats included: A4, G4, then A4
+            // pressed again while G4 is still down stays one phrase A4 G4 A4
+            if (phrase.size() >= maxPhraseLength)
+                phrase.erase (phrase.begin());   // keep the most recent playing
             phrase.push_back (note);
             keyCounts[(size_t) note]++;
+            heldKeyCount++;
             lastVelocity = msg.getVelocity();
-            lastNoteOnAbs = absEvent;
-
-            // (re)arm the start: it fires once the window has closed, and a
-            // chord mate arriving later rolls that start forward
-            pendingFire = true;
-            fireAtAbs = absEvent + chordWindowSamples;
-
             rebuildSequence();
+
+            if (samplesToNextTick < 0 && ! sequence.empty())
+            {
+                // phrase start: the first note sounds immediately, the clock
+                // then cycles the sequence from its next entry
+                step = 0;
+                tick (midiOut, pos);
+                samplesToNextTick = pos + stepSamples;
+                if (gateCountdown >= 0)
+                    gateCountdown += pos;
+            }
         }
         else if (msg.isNoteOff())
         {
             const int note = msg.getNoteNumber();
             auto& count = keyCounts[(size_t) note];
             if (count > 0)
-                count--;
-
-            if (count > 0)
-                continue;
-
-            // this was the last press of that pitch: drop it from the phrase
-            const auto it = std::find (phrase.begin(), phrase.end(), note);
-            if (it == phrase.end())
-                continue;   // stale note-off (pitch already replaced)
-            phrase.erase (it);
-
-            if (! phrase.empty())
             {
-                rebuildSequence();   // phrase follows the keys still held
-                continue;
+                count--;
+                if (count == 0)
+                    heldKeyCount--;
             }
 
-            // last key released: either hold the sequence...
-            if (holdLatch || holdSamples > 0)
-                holdCountdown = holdLatch ? -1 : holdSamples + pos;
-            // ...or stop right away (hold at zero)
+            if (heldKeyCount > 0 || sustaining || sequence.empty() || samplesToNextTick < 0)
+                continue;
+
+            // last key released: keep the phrase looping (hold) or stop (hold=0)
+            if (holdLatch)
+            {
+                sustaining = true;                  // loop forever until replaced
+            }
+            else if (holdSamples > 0)
+            {
+                sustaining = true;
+                holdCountdown = holdSamples + pos;
+            }
             else
             {
                 stopNote (midiOut, pos);
                 sequence.clear();
+                phrase.clear();
                 samplesToNextTick = -1;
                 gateCountdown = -1;
                 step = 0;
-                pendingFire = false;
             }
         }
 
         // other messages (CC, pitch bend...) are consumed, not forwarded
     }
 
-    blockStartAbs += numSamples;
-
-    // ---- pass 2: fire / tick / gate / hold-expiry timeline -------------------
+    // ---- pass 2: tick / gate / hold-expiry timeline --------------------------
     constexpr int never = std::numeric_limits<int>::max();
-
-    auto fireStart = [&] (int pos)
-    {
-        step = 0;
-        tick (midiOut, pos);            // plays the pattern start, arms the gate
-        samplesToNextTick = stepSamples;
-    };
-
     int pos = 0;
 
     while (pos < numSamples)
     {
-        const bool haveFire = pendingFire && ! sequence.empty();
         const bool haveTick = samplesToNextTick >= 0 && ! sequence.empty();
         const bool haveGate = gateCountdown >= 0;
         const bool haveHold = holdCountdown >= 0;
-        if (! haveFire && ! haveTick && ! haveGate && ! haveHold)
+        if (! haveTick && ! haveGate && ! haveHold)
             break;
 
-        const int toFire = haveFire
-            ? juce::jlimit (0, never, (int) (fireAtAbs - absStart - pos)) : never;
         const int toTick = haveTick ? samplesToNextTick : never;
         const int toGate = haveGate ? gateCountdown : never;
         const int toHold = haveHold ? holdCountdown : never;
-        const int next = std::min ({ toFire, toTick, toGate, toHold });
+        const int next = std::min ({ toTick, toGate, toHold });
         const int remaining = numSamples - pos;
 
         if (next >= remaining)
         {
-            // nothing fires within this block; toFire is absolute, the rest carry
+            // nothing fires within this block: carry the countdowns over
             if (haveTick) samplesToNextTick -= remaining;
             if (haveGate) gateCountdown  -= remaining;
             if (haveHold) holdCountdown  -= remaining;
@@ -193,21 +176,17 @@ void ArpEngine::process (const juce::MidiBuffer& midiIn, juce::MidiBuffer& midiO
         if (haveGate) gateCountdown  -= next;
         if (haveHold) holdCountdown  -= next;
 
-        if (toFire == next)
+        if (toHold == next)
         {
-            pendingFire = false;
-            fireStart (pos);
-        }
-        else if (toHold == next)
-        {
-            // hold ran out: silence and forget the sequence
+            // hold ran out: silence and forget the phrase
             stopNote (midiOut, pos);
             sequence.clear();
+            phrase.clear();
             step = 0;
+            sustaining = false;
             samplesToNextTick = -1;
             gateCountdown = -1;
             holdCountdown = -1;
-            pendingFire = false;
         }
         else if (toTick <= toGate)
         {
@@ -228,7 +207,7 @@ void ArpEngine::process (const juce::MidiBuffer& midiIn, juce::MidiBuffer& midiO
 void ArpEngine::rebuildSequence()
 {
     if (phrase.empty())
-        return;   // keep any frozen sequence (sustain) untouched
+        return;
 
     const auto mode = (Mode) params.mode;
     std::vector<int> notes (phrase);
@@ -275,7 +254,9 @@ void ArpEngine::tick (juce::MidiBuffer& out, int pos)
     addNoteOn (out, pos, activeNote, lastVelocity);
 
     if (mode != Mode::random)
-        step = (index + 1) % (int) sequence.size();
+        step = index + 1;   // no modulo here: if the phrase keeps growing the
+                            // cycle continues from the next entry; rebuildSequence()
+                            // wraps it into range
 
     // with a full-length gate the next tick's note-off closes the note instead
     gateCountdown = (gateSamples < stepSamples) ? gateSamples : -1;

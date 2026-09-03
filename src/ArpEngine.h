@@ -13,16 +13,19 @@
     Feed it the incoming MIDI stream, it returns the arpeggiated stream.
 
     Input model:
-      - Note-ons landing within a small "played together" window (~30 ms)
-        join the current phrase, so chords played by hand form one sequence.
-      - The phrase starts once the window has closed, so a chord begins as
-        a complete, correctly ordered pattern (~30 ms after the last note-on).
-      - A note-on after that window REPLACES the phrase completely: the
-        previous sequence is dropped, even if its keys are still held down
-        (their later note-offs simply fall through).
-      - When the last key is released the last sequence keeps looping for
-        holdSeconds; at holdSeconds the arp silences itself. With holdLatch
-        it loops forever until a new note replaces it.
+      - A phrase is every note played while at least one key is physically
+        held: overlapping presses accumulate into the sequence, so a triad
+        pressed with a little spread stays one phrase, and re-pressing a
+        note records it again (A4, G4, then A4 pressed again while G4 is
+        still down -> A4 G4 A4). The sequence cycles in the selected mode
+        (e.g. "as played": the notes in playing order, then the same notes
+        one octave up, and so on).
+      - When the last key is released the phrase keeps looping for
+        holdSeconds (holdLatch: forever). Note-offs never remove notes from
+        the phrase -- releasing keys does not shrink the pattern.
+      - A note played while nothing is held starts a NEW phrase and the
+        previous sequence is dropped completely: that is how the held loop
+        gets replaced. A duplicate note-on for a key still down is ignored.
 
     Extension points for the EMAX behaviour:
       - new pattern modes: extend Mode + rebuildSequence()/tick()
@@ -61,30 +64,22 @@ private:
     double sampleRate = 44100.0;
     Params params;
 
-    std::vector<int> phrase;            // notes of the current phrase, as played
+    std::vector<int> phrase;            // notes played since the last full release
     std::array<int, 128> keyCounts {};  // physical key-down count per pitch
-    std::vector<int> sequence;          // expanded arp notes; frozen while holding
+    int heldKeyCount = 0;               // total physical keys currently down
+    bool sustaining = false;            // all keys up, phrase still looping
+    std::vector<int> sequence;          // expanded arp notes for the current phrase
     int step = 0;                       // index into sequence
     int activeNote = -1;                // note currently sounding
     int lastVelocity = 100;
 
     int samplesToNextTick = -1;         // -1: clock stopped
     int gateCountdown = -1;             // -1: no note-off scheduled
-    int holdCountdown = -1;             // -1: not sustaining
+    int holdCountdown = -1;             // -1: not on a timed hold
     int stepSamples = 11025;
     int gateSamples = 5512;
     int holdSamples = 0;
     bool holdLatch = false;
-
-    bool pendingFire = false;           // phrase armed, waiting for the window to close
-    juce::int64 fireAtAbs = 0;          // absolute sample position of that start
-
-    // note-ons within this span count as "played together"; past it, a new
-    // note-on replaces the whole phrase. ~30 ms, recomputed in prepare().
-    int chordWindowSamples = 1323;
-
-    juce::int64 blockStartAbs = 0;      // absolute sample counter, for the window
-    juce::int64 lastNoteOnAbs = -(1 << 30);
 
     juce::Random random;
 };
