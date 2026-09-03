@@ -50,6 +50,7 @@ private:
     std::atomic<float>* rateParam    = nullptr;
     std::atomic<float>* gateParam    = nullptr;
     std::atomic<float>* octavesParam = nullptr;
+    std::atomic<float>* holdParam    = nullptr;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (EMAXArpAudioProcessor)
 };

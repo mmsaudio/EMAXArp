@@ -71,3 +71,22 @@ target_compile_definitions(EMAXArp PRIVATE
 
 # Disable VST2 build globally
 set(JUCE_BUILD_VST2_CLIENT FALSE CACHE BOOL "" FORCE)
+
+
+# Optional headless engine tests: cmake -B build/tests -DEMAXARP_BUILD_TESTS=ON
+option(EMAXARP_BUILD_TESTS "Build ArpEngine headless tests" OFF)
+if(EMAXARP_BUILD_TESTS)
+    juce_add_console_app(EMAXArpTests PRODUCT_NAME "EMAXArpTests")
+    target_sources(EMAXArpTests PRIVATE
+        tests/ArpEngineTest.cpp
+        src/ArpEngine.cpp
+    )
+    target_include_directories(EMAXArpTests PRIVATE src)
+    target_link_libraries(EMAXArpTests
+        PRIVATE
+            juce::juce_audio_basics
+        PUBLIC
+            juce::juce_recommended_config_flags
+            juce::juce_recommended_warning_flags
+    )
+endif()

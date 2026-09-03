@@ -16,6 +16,7 @@ EMAXArpAudioProcessor::EMAXArpAudioProcessor()
     rateParam     = apvts.getRawParameterValue ("rate");
     gateParam     = apvts.getRawParameterValue ("gate");
     octavesParam  = apvts.getRawParameterValue ("octaves");
+    holdParam     = apvts.getRawParameterValue ("hold");
 }
 
 //==============================================================================
@@ -39,6 +40,20 @@ juce::AudioProcessorValueTreeState::ParameterLayout EMAXArpAudioProcessor::creat
 
     layout.add (std::make_unique<juce::AudioParameterInt> (
         juce::ParameterID { "octaves", 1 }, "Octaves", 0, 3, 1));
+
+    // Hold: how long the last sequence keeps looping after all keys are
+    // released. The very top of the range (10 s) means "forever" until a
+    // new note replaces the sequence -- displayed as the infinity sign.
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
+        juce::ParameterID { "hold", 1 }, "Hold",
+        juce::NormalisableRange<float> (0.0f, 10.0f, 0.01f, 0.4f), 2.0f,
+        juce::AudioParameterFloatAttributes()
+            .withStringFromValueFunction ([] (float value, int)
+            {
+                if (value >= 9.999f)
+                    return juce::String (juce::CharPointer_UTF8 ("\xE2\x88\x9E")); // infinity
+                return juce::String (value, 2) + " s";
+            })));
 
     return layout;
 }
@@ -69,6 +84,11 @@ void EMAXArpAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
     p.rateHz  = rateParam->load();
     p.gate    = gateParam->load();
     p.octaves = (int) octavesParam->load();
+
+    const float holdValue = holdParam->load();
+    p.holdSeconds = holdValue;
+    p.holdLatch   = holdValue >= 9.9995f;   // knob at maximum: hold forever
+
     arp.setParameters (p);
 
     juce::MidiBuffer out;

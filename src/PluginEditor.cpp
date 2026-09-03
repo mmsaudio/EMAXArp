@@ -25,7 +25,7 @@ EMAXArpAudioProcessorEditor::EMAXArpAudioProcessorEditor (EMAXArpAudioProcessor&
     modeAttachment = std::make_unique<ComboAtt> (p.apvts, "mode", modeBox);
 
     // --- sliders -------------------------------------------------------------
-    for (auto* slider : { &rateSlider, &gateSlider, &octavesSlider })
+    for (auto* slider : { &rateSlider, &gateSlider, &octavesSlider, &holdSlider })
     {
         slider->setSliderStyle (juce::Slider::LinearHorizontal);
         slider->setTextBoxStyle (juce::Slider::TextBoxRight, false, 70, 20);
@@ -41,9 +41,10 @@ EMAXArpAudioProcessorEditor::EMAXArpAudioProcessorEditor (EMAXArpAudioProcessor&
     rateAttachment    = std::make_unique<SliderAtt> (p.apvts, "rate", rateSlider);
     gateAttachment    = std::make_unique<SliderAtt> (p.apvts, "gate", gateSlider);
     octavesAttachment = std::make_unique<SliderAtt> (p.apvts, "octaves", octavesSlider);
+    holdAttachment    = std::make_unique<SliderAtt> (p.apvts, "hold", holdSlider);
 
     // --- labels --------------------------------------------------------------
-    for (auto* label : { &modeLabel, &rateLabel, &gateLabel, &octavesLabel })
+    for (auto* label : { &modeLabel, &rateLabel, &gateLabel, &octavesLabel, &holdLabel })
     {
         label->setFont (juce::Font (juce::FontOptions (14.0f)));
         label->setColour (juce::Label::textColourId, text);
@@ -51,7 +52,7 @@ EMAXArpAudioProcessorEditor::EMAXArpAudioProcessorEditor (EMAXArpAudioProcessor&
         addAndMakeVisible (label);
     }
 
-    setSize (440, 280);
+    setSize (440, 330);
 }
 
 //==============================================================================
@@ -79,4 +80,5 @@ void EMAXArpAudioProcessorEditor::resized()
     placeRow (rateLabel, rateSlider);
     placeRow (gateLabel, gateSlider);
     placeRow (octavesLabel, octavesSlider);
+    placeRow (holdLabel, holdSlider);
 }
